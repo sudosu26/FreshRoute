@@ -74,10 +74,14 @@ ARCHETYPES = [
 ]
 
 
-def generate_scenario(seed: Optional[int] = None) -> Dict[str, Any]:
+def generate_scenario(
+    seed: Optional[int] = None,
+    archetype_type: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Generates a realistic, dynamic produce distribution scenario based on random archetypes.
     Guarantees exact reproducibility when an integer seed is provided.
+    Optionally accepts a specific archetype_type for targeted demo scenarios.
     """
     if seed is None:
         seed = random.randint(10000, 99999)
@@ -86,11 +90,16 @@ def generate_scenario(seed: Optional[int] = None) -> Dict[str, Any]:
     scenario_id = f"SCN-{rng.randint(1000, 9999)}"
 
     # Select Archetype
-    archetype = rng.choice(ARCHETYPES)
+    if archetype_type:
+        matched = next((a for a in ARCHETYPES if a["type"] == archetype_type or a["name"].lower() == archetype_type.lower()), None)
+        archetype = matched if matched else rng.choice(ARCHETYPES)
+    else:
+        archetype = rng.choice(ARCHETYPES)
+
     scenario_name = archetype["name"]
     scenario_description = archetype["description"]
     modifier_text = archetype["modifier_text"]
-    archetype_type = archetype["type"]
+    selected_type = archetype["type"]
 
     # 1. Generate Trucks (2–4 trucks, capacity 150–500 units)
     num_trucks = rng.randint(2, 4)
@@ -111,7 +120,6 @@ def generate_scenario(seed: Optional[int] = None) -> Dict[str, Any]:
         demand = float(rng.randint(100, 1200))
         distance = float(rng.randint(20, 800))
         transport_cost = round(rng.uniform(8.0, 25.0), 2)
-        # Market price around 45 base ± 30%
         market_price = round(rng.uniform(35.0, 65.0) * rng.uniform(0.7, 1.3), 2)
 
         destinations.append({
@@ -145,26 +153,26 @@ def generate_scenario(seed: Optional[int] = None) -> Dict[str, Any]:
         })
 
     # 4. Apply Archetype Modifiers
-    if archetype_type == "HARVEST_GLUT":
+    if selected_type == "HARVEST_GLUT":
         for b in batches:
             b["quantity_kg"] = round(b["quantity_kg"] * 1.6, 1)
         for d in destinations:
             d["market_price_per_kg"] = round(max(5.0, d["market_price_per_kg"] * 0.7), 2)
 
-    elif archetype_type == "FESTIVAL_SURGE":
+    elif selected_type == "FESTIVAL_SURGE":
         for d in destinations:
             d["demand_kg"] = round(d["demand_kg"] * 1.7, 1)
             d["market_price_per_kg"] = round(d["market_price_per_kg"] * 1.3, 2)
 
-    elif archetype_type == "FUEL_SPIKE":
+    elif selected_type == "FUEL_SPIKE":
         for d in destinations:
             d["transport_cost_per_km"] = round(d["transport_cost_per_km"] * 2.0, 2)
 
-    elif archetype_type == "MONSOON_DELAYS":
+    elif selected_type == "MONSOON_DELAYS":
         for d in destinations:
             d["distance_km"] = round(d["distance_km"] * 1.4, 1)
 
-    elif archetype_type == "COLD_CHAIN_FAIL":
+    elif selected_type == "COLD_CHAIN_FAIL":
         k = max(1, int(len(batches) * 0.4))
         affected_indices = rng.sample(range(len(batches)), k)
         for idx in affected_indices:
@@ -172,10 +180,9 @@ def generate_scenario(seed: Optional[int] = None) -> Dict[str, Any]:
                 0.5, round(batches[idx]["remaining_shelf_life_days"] * 0.5, 1)
             )
 
-    # 5. Requirement: Must include at least one batch with <= 2 days shelf life
+    # 5. Guarantee at least one batch with <= 2.0 days shelf life
     min_shelf = min(b["remaining_shelf_life_days"] for b in batches)
     if min_shelf > 2.0:
-        # Pick the batch with the lowest shelf life or first batch and cap it to 1.5 - 2.0 days
         fastest_expiring = min(batches, key=lambda b: b["remaining_shelf_life_days"])
         fastest_expiring["remaining_shelf_life_days"] = round(rng.uniform(1.0, 2.0), 1)
 
@@ -189,7 +196,7 @@ def generate_scenario(seed: Optional[int] = None) -> Dict[str, Any]:
         "scenario_name": scenario_name,
         "scenario_description": scenario_description,
         "modifier_text": modifier_text,
-        "archetype": archetype_type,
+        "archetype": selected_type,
         "batches": batches,
         "destinations": destinations,
         "trucks": trucks,

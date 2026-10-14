@@ -1,6 +1,6 @@
 from typing import List, Optional, Dict, Any
 from sqlalchemy import Column, Integer, String, Float
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 try:
     from .database import Base
 except ImportError:
@@ -120,24 +120,21 @@ class DispatchItem(BaseModel):
     net_profit: float
     reason: str
     is_spoiled: bool
-
-
-class OptimizationSummary(BaseModel):
-    optimized_spoilage_kg: float
-    baseline_spoilage_kg: float
-    spoilage_reduction_pct: float
-    optimized_revenue: float
-    baseline_revenue: float
-    revenue_increase_pct: float
-    total_batches: int
-    total_quantity_kg: float
+    impact: float = 0.0
+    allocated: bool = True
+    truck_id: Optional[str] = None
+    viability_days: Optional[float] = None
 
 
 class OptimizationResponse(BaseModel):
     optimized_plan: List[DispatchItem]
     baseline_plan: List[DispatchItem]
-    summary: OptimizationSummary
+    unallocated: List[DispatchItem] = Field(default_factory=list)
+    summary: Dict[str, Any]
     scenario: Optional[Dict[str, Any]] = None
+    plan_hash: str
+    seed: Optional[int] = None
+    warnings: List[str] = Field(default_factory=list)
 
 
 class SeedResponse(BaseModel):

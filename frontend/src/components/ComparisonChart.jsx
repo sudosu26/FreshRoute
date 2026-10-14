@@ -93,8 +93,8 @@ export default function ComparisonChart({ summary = {} }) {
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 flex flex-col">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h3 className="text-lg font-semibold text-gray-900">Revenue (₹)</h3>
-            <p className="text-xs text-gray-500">Higher is better • Realized marketplace value</p>
+            <h3 className="text-lg font-semibold text-gray-900">Net Revenue (₹)</h3>
+            <p className="text-xs text-gray-500">Marketplace revenue after transport costs</p>
           </div>
           <div className="flex items-center gap-3 text-xs">
             <span className="flex items-center gap-1.5 text-gray-600">

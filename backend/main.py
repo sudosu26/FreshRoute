@@ -17,7 +17,7 @@ try:
         OptimizeRequest,
     )
     from .seed import seed_database
-    from .optimizer import run_optimized, run_baseline, compare_plans
+    from .optimizer import run_optimized, run_baseline, compare_plans, plan_hash
     from .scenario_generator import generate_scenario
 except ImportError:
     from database import engine, Base, get_db, SessionLocal
@@ -32,7 +32,7 @@ except ImportError:
         OptimizeRequest,
     )
     from seed import seed_database
-    from optimizer import run_optimized, run_baseline, compare_plans
+    from optimizer import run_optimized, run_baseline, compare_plans, plan_hash
     from scenario_generator import generate_scenario
 
 CURRENT_SCENARIO_META: Dict[str, Any] = {}
@@ -55,12 +55,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="FreshRoute API",
-    description="Perishable produce distribution decision-support dashboard API with dynamic random scenario generation",
-    version="2.0.0",
+    description="High-performance perishable produce distribution decision-support API",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
-# Enable CORS (allow all origins for development)
+# Enable CORS for frontend development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -73,47 +73,53 @@ app.add_middleware(
 @app.get("/")
 def read_root():
     return {
-        "message": "FreshRoute Dynamic Decision-Support API is operational",
-        "current_scenario": CURRENT_SCENARIO_META.get("scenario_name", "Default"),
+        "status": "operational",
+        "service": "FreshRoute Decision Support Engine",
+        "active_scenario": CURRENT_SCENARIO_META.get("scenario_name", "Default"),
+        "active_seed": CURRENT_SCENARIO_META.get("seed"),
     }
 
 
-@app.get("/api/scenario", response_model=ScenarioResponse)
+@app.get("/api/scenario")
 def get_scenario(
     seed: Optional[int] = Query(None, description="Optional integer seed for reproducible generation"),
+    archetype: Optional[str] = Query(None, description="Optional archetype filter for demo"),
+    include_optimization: bool = Query(False, description="Optionally include optimization plan in single round-trip"),
     db: Session = Depends(get_db),
 ):
     """
     Generate a dynamic produce distribution scenario based on random archetypes.
     Guarantees exact reproducibility if an integer seed is provided.
-    Also synchronizes the generated scenario to the SQLite database.
+    Synchronizes SQLite using fast bulk operations.
     """
-    scenario = generate_scenario(seed=seed)
+    scenario = generate_scenario(seed=seed, archetype_type=archetype)
 
-    # Synchronize database with the new scenario
+    # Bulk synchronize SQLite database with the new scenario
     db.query(Batch).delete()
     db.query(Destination).delete()
-    db.commit()
 
-    for batch_data in scenario["batches"]:
-        batch = Batch(
-            commodity=batch_data["commodity"],
-            quantity_kg=batch_data["quantity_kg"],
-            remaining_shelf_life_days=batch_data["remaining_shelf_life_days"],
-            current_location=batch_data["current_location"],
+    batch_objects = [
+        Batch(
+            commodity=b["commodity"],
+            quantity_kg=b["quantity_kg"],
+            remaining_shelf_life_days=b["remaining_shelf_life_days"],
+            current_location=b["current_location"],
         )
-        db.add(batch)
-
-    for dest_data in scenario["destinations"]:
-        dest = Destination(
-            name=dest_data["name"],
-            demand_kg=dest_data["demand_kg"],
-            distance_km=dest_data["distance_km"],
-            transport_cost_per_km=dest_data["transport_cost_per_km"],
-            market_price_per_kg=dest_data["market_price_per_kg"],
+        for b in scenario["batches"]
+    ]
+    dest_objects = [
+        Destination(
+            name=d["name"],
+            demand_kg=d["demand_kg"],
+            distance_km=d["distance_km"],
+            transport_cost_per_km=d["transport_cost_per_km"],
+            market_price_per_kg=d["market_price_per_kg"],
         )
-        db.add(dest)
+        for d in scenario["destinations"]
+    ]
 
+    db.bulk_save_objects(batch_objects)
+    db.bulk_save_objects(dest_objects)
     db.commit()
 
     CURRENT_SCENARIO_META.clear()
@@ -126,21 +132,37 @@ def get_scenario(
         "archetype": scenario["archetype"],
     })
 
+    if include_optimization:
+        opt_plan, opt_unallocated = run_optimized(scenario["batches"], scenario["destinations"], scenario["trucks"])
+        base_plan, _ = run_baseline(scenario["batches"], scenario["destinations"], scenario["trucks"])
+        summary = compare_plans(
+            opt_plan,
+            base_plan,
+            batches=scenario["batches"],
+            destinations=scenario["destinations"],
+            trucks=scenario["trucks"],
+        )
+        scenario["optimization"] = {
+            "optimized_plan": opt_plan,
+            "baseline_plan": base_plan,
+            "summary": summary,
+            "unallocated": opt_unallocated,
+            "plan_hash": plan_hash(opt_plan, scenario["seed"]),
+        }
+
     return scenario
 
 
 @app.get("/api/batches", response_model=List[BatchResponse])
 def get_batches(db: Session = Depends(get_db)):
     """Return all batches from the active scenario database."""
-    batches = db.query(Batch).all()
-    return batches
+    return db.query(Batch).all()
 
 
 @app.get("/api/destinations", response_model=List[DestinationResponse])
 def get_destinations(db: Session = Depends(get_db)):
     """Return all destinations from the active scenario database."""
-    destinations = db.query(Destination).all()
-    return destinations
+    return db.query(Destination).all()
 
 
 @app.post("/api/seed", response_model=SeedResponse)
@@ -155,50 +177,32 @@ def seed(
     return result
 
 
-@app.post("/api/optimize", response_model=OptimizationResponse)
+@app.post("/api/optimize")
 def optimize(
     payload: Optional[Dict[str, Any]] = Body(None),
     db: Session = Depends(get_db),
 ):
     """
     Run heuristic optimization.
-    Can operate on a dynamic scenario payload sent from the client or on the active scenario in SQLite.
+    Operates directly on the scenario payload sent from the client or on the active scenario in SQLite.
+    Guarantees deterministic output for identical inputs.
     """
-    batches = []
-    destinations = []
-    trucks = []
-    scenario_meta = None
+    scenario_data = None
+    if payload and isinstance(payload.get("scenario"), dict):
+        scenario_data = payload["scenario"]
+    elif payload and payload.get("batches") and payload.get("destinations"):
+        scenario_data = payload
 
-    if payload:
-        if "scenario" in payload and isinstance(payload["scenario"], dict):
-            sc = payload["scenario"]
-            batches = sc.get("batches", [])
-            destinations = sc.get("destinations", [])
-            trucks = sc.get("trucks", [])
-            scenario_meta = {
-                "scenario_id": sc.get("scenario_id"),
-                "scenario_name": sc.get("scenario_name"),
-                "scenario_description": sc.get("scenario_description"),
-                "modifier_text": sc.get("modifier_text"),
-                "seed": sc.get("seed"),
-            }
-        else:
-            batches = payload.get("batches", [])
-            destinations = payload.get("destinations", [])
-            trucks = payload.get("trucks", [])
-            if "scenario_name" in payload:
-                scenario_meta = {
-                    "scenario_id": payload.get("scenario_id"),
-                    "scenario_name": payload.get("scenario_name"),
-                    "scenario_description": payload.get("scenario_description"),
-                    "modifier_text": payload.get("modifier_text"),
-                    "seed": payload.get("seed"),
-                }
-
-    if not batches or not destinations:
-        # Fall back to database
+    if scenario_data:
+        batches = scenario_data.get("batches", [])
+        destinations = scenario_data.get("destinations", [])
+        trucks = scenario_data.get("trucks", [])
+        chosen_seed = scenario_data.get("seed")
+    else:
         batches = db.query(Batch).all()
         destinations = db.query(Destination).all()
+        trucks = []
+        chosen_seed = CURRENT_SCENARIO_META.get("seed")
 
     if not batches or not destinations:
         raise HTTPException(
@@ -206,20 +210,28 @@ def optimize(
             detail="Insufficient batches or destinations to optimize. Generate a scenario first.",
         )
 
-    opt_dispatches, opt_spoilage = run_optimized(batches, destinations, trucks=trucks)
-    base_dispatches, base_spoilage = run_baseline(batches, destinations, trucks=trucks)
+    opt_dispatches, opt_unallocated = run_optimized(batches, destinations, trucks=trucks)
+    base_dispatches, _ = run_baseline(batches, destinations, trucks=trucks)
 
     summary = compare_plans(
-        (opt_dispatches, opt_spoilage),
-        (base_dispatches, base_spoilage),
+        opt_dispatches,
+        base_dispatches,
         batches=batches,
+        destinations=destinations,
+        trucks=trucks,
     )
+
+    response_scenario = scenario_data or CURRENT_SCENARIO_META
+    allocation_hash = plan_hash(opt_dispatches, chosen_seed)
 
     return {
         "optimized_plan": opt_dispatches,
         "baseline_plan": base_dispatches,
         "summary": summary,
-        "scenario": scenario_meta or CURRENT_SCENARIO_META,
+        "scenario": response_scenario,
+        "unallocated": opt_unallocated,
+        "plan_hash": allocation_hash,
+        "seed": chosen_seed,
     }
 
 
